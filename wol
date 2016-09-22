@@ -1,0 +1,179 @@
+#!/bin/bash
+
+declare -a entries
+declare -a targets
+declare -a groups
+declare -a hosts
+
+#SYSTEMDB="/usr/local/lib/wolablehosts"
+SYSTEMDB="/opt/scripts/.wolablehosts"
+WAKE="wakeonlan"
+
+# Show Usage
+function Usage()
+{
+	echo -e "========================"
+	echo -e "WOL : WOL Scripting Tool"
+	echo -e "========================"
+	echo -e "This tools looks for a list of hosts in ~/.wolablehosts"
+	echo -e "Each line is an entry of the format 'hostname group MACAddress'"
+	echo -e "Where MACAddress if the format 'AA:BB:CC:DD:EE:FF'"
+	echo -e "\n"
+	echo -e "wol list\tList known hosts"
+	echo -e "wol group [grp]\tWake all hosts in group"
+	echo -e "wol host [host]\tWake host (Host is optional and the default)"
+	echo -e "wol all\t\tTo wake all hosts in the file"
+	echo -e "wol hostname\tTo wake only the given host"
+	echo -e "wol help\tThis message"
+	echo -e "wol -h\t\tThis message"
+	echo -e "\nYou can place multiple group and host options on the commandline"
+}
+
+# Find WOL Tool Binary
+function FindTool()
+{
+	${WAKE} -v > /dev/null
+
+	if [ $? = 0 -o $? = 1 ]; then
+		echo -e " "
+	else
+		etherwake -V > /dev/null
+
+		if [ $? = 3 ]; then
+			WAKE=etherwake
+		else
+			echo -e "Neither wakeonlan or etherwake is installed, exitting"
+			exit 127
+		fi
+	fi
+}
+
+# Get entries in Database File
+function GetTargets()
+{
+	count=0
+	while read host group mac rem; do
+		if [ ! "${host}" = "#" ]; then
+			targets[${count}]="${host} ${group} ${mac}"
+			count=$(( ${count} + 1 ))
+		fi
+	done < "$1"
+}
+
+# List hosts in Database File
+function ListHosts()
+{
+	targetcount=${#targets[@]}
+	printf "%-25s %-15s %-20s\n" "Host" "Group" "MAC Address"
+	echo {1..23} | tr [[:digit:]] "#" | tr [[:space:]] "#"
+	echo -e ""
+	for ((count=0; count < ${targetcount}; ++count)); do
+		read host group mac rem<<eof
+${targets[${count}]}
+eof
+		printf "%-25s %-15s %-20s\n" ${host} ${group} ${mac}
+	done
+}
+
+# AddTarget : Add Target to appropriate list
+# Input Parameters: [target]
+function AddTarget()
+{
+	if [ "${groupmode}" = "true" ]; then
+		count=${#groups[@]}
+		groups[${count}]="$1"
+	else
+		count=${#hosts[@]}
+		hosts[${count}]="$1"
+	fi
+}
+
+# WakeGroups: Wake listed groups
+# Input Parameters: none
+function WakeGroups()
+{
+	for ((count=0; count < ${#groups[@]}; ++count)); do
+		wakegroup=${groups[${count}]}
+
+		for ((index=0; index < ${#targets[@]}; ++index)); do
+			read host group mac rem<<eof
+${targets[${index}]}
+eof
+
+			if [ "${wakegroup}" = ${group} ]; then
+				echo "Waking ${host} from ${group} with ${mac}"
+#				${WAKE} "${mac}"
+			fi
+		done
+	done
+}
+
+# WakeHosts: Wake listed hosts
+# Input Parameters: none
+function WakeHosts()
+{
+	for ((count=0; count < ${#hosts[@]}; ++count)); do
+		wakehost=${hosts[${count}]}
+
+		for ((index=0; index < ${#targets[@]}; ++index)); do
+			read host group mac rem<<eof
+${targets[${index}]}
+eof
+
+			if [ "${wakehost}" = ${host} ]; then
+        	               	echo "Waking ${host} with ${mac}"
+#				${WAKE} "${mac}"
+			fi
+		done
+	done
+}
+
+# WakeTargets: Wake Targets in Host and Group Lists
+# Input Parameters: none
+function WakeTargets()
+{
+	WakeGroups
+	WakeHosts
+}
+
+#
+# Main Loop
+#
+
+if [ -e ~/.wolablehosts -o -e ${SYSTEMDB} ]; then
+	if [ -e ~/.wolablehosts ]; then
+		targetfile=~/.wolablehosts
+	else
+		targetfile=${SYSTEMDB}
+	fi
+
+	GetTargets "${targetfile}"
+
+	while [ ! "$1" = "" ]; do
+		case "$1" in
+		"-h"|"help"|"")
+			Usage
+			exit 0 ;;
+		"list")
+			ListHosts
+			exit 0 ;;
+		"group")
+			groupmode=true
+			;;
+		"host")
+			groupmode=false
+			;;
+		*)
+			AddTarget "$1"
+			;;
+		esac
+		shift 1
+	done
+
+	FindTool
+
+	WakeTargets
+else
+        echo "No list of wol-able hosts found"
+fi
+
