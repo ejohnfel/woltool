@@ -8,6 +8,7 @@ declare -a hosts
 #SYSTEMDB="/usr/local/lib/wolablehosts"
 SYSTEMDB="/opt/scripts/.wolablehosts"
 WAKE="wakeonlan"
+targetfile=""
 
 # Show Usage
 function Usage()
@@ -29,13 +30,28 @@ function Usage()
 	echo -e "\nYou can place multiple group and host options on the commandline"
 }
 
+# Convert: Convert Old Format To New Format
+# Input Parameters: [oldfile]
+function ConvertFile()
+{
+	TMP="/tmp/convert.${RANDOM}"
+	while read host group mac rem; do
+		echo -e "${host} ${mac} ${group}" >> ${TMP}
+	done < "$1"
+
+	pth=$(dirname "$1")
+	base=$(basename "$1")
+	mv "$1" "${pth}/${base}.bck"
+	mv "${TMP}" "$1"
+}
+
 # Find WOL Tool Binary
 function FindTool()
 {
 	${WAKE} -v > /dev/null
 
 	if [ $? = 0 -o $? = 1 ]; then
-		echo -e " "
+		echo -n ""
 	else
 		etherwake -V > /dev/null
 
@@ -52,9 +68,10 @@ function FindTool()
 function GetTargets()
 {
 	count=0
-	while read host group mac rem; do
+	while read host rem; do
 		if [ ! "${host}" = "#" ]; then
-			targets[${count}]="${host} ${group} ${mac}"
+			targets[${count}]="${host} ${rem}"
+
 			count=$(( ${count} + 1 ))
 		fi
 	done < "$1"
@@ -64,14 +81,17 @@ function GetTargets()
 function ListHosts()
 {
 	targetcount=${#targets[@]}
-	printf "%-25s %-15s %-20s\n" "Host" "Group" "MAC Address"
+	printf "%-15s %-20s %s\n" "Host" "MAC Address" "Groups"
+	echo {1..23} | tr [[:digit:]] "#" | tr [[:space:]] "#"
+	echo -e "\nShowing : ${targetfile}"
 	echo {1..23} | tr [[:digit:]] "#" | tr [[:space:]] "#"
 	echo -e ""
+
 	for ((count=0; count < ${targetcount}; ++count)); do
-		read host group mac rem<<eof
+		read host mac groups rem<<eof
 ${targets[${count}]}
 eof
-		printf "%-25s %-15s %-20s\n" ${host} ${group} ${mac}
+		printf "%-15s %-20s %s\n" ${host} ${mac} ${groups}
 	done
 }
 
@@ -96,14 +116,19 @@ function WakeGroups()
 		wakegroup=${groups[${count}]}
 
 		for ((index=0; index < ${#targets[@]}; ++index)); do
-			read host group mac rem<<eof
+			read host mac groups rem<<eof
 ${targets[${index}]}
 eof
+			TFS="${IFS}"
+			IFS=","
+			for group in ${groups}; do
+				if [ "${wakegroup}" = ${group} ]; then
+					echo "Waking ${host} from ${group} with ${mac}"
+					${WAKE} "${mac}" > /dev/null
+				fi
+			done
 
-			if [ "${wakegroup}" = ${group} ]; then
-				echo "Waking ${host} from ${group} with ${mac}"
-#				${WAKE} "${mac}"
-			fi
+			IFS="${TFS}"
 		done
 	done
 }
@@ -116,13 +141,13 @@ function WakeHosts()
 		wakehost=${hosts[${count}]}
 
 		for ((index=0; index < ${#targets[@]}; ++index)); do
-			read host group mac rem<<eof
+			read host mac groups rem<<eof
 ${targets[${index}]}
 eof
 
 			if [ "${wakehost}" = ${host} ]; then
         	               	echo "Waking ${host} with ${mac}"
-#				${WAKE} "${mac}"
+				${WAKE} "${mac}" > /dev/null
 			fi
 		done
 	done
@@ -156,6 +181,9 @@ if [ -e ~/.wolablehosts -o -e ${SYSTEMDB} ]; then
 			exit 0 ;;
 		"list")
 			ListHosts
+			exit 0 ;;
+		"-c")
+			ConvertFile "$2"
 			exit 0 ;;
 		"group")
 			groupmode=true
