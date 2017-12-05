@@ -4,10 +4,13 @@ declare -a entries
 declare -a targets
 declare -a groups
 declare -a hosts
+declare -a waithosts
 
 #SYSTEMDB="/usr/local/lib/wolablehosts"
 SYSTEMDB="/opt/scripts/.wolablehosts"
 WAKE="wakeonlan"
+PingWait=0
+wakecount=0
 targetfile=""
 
 # Show Usage
@@ -17,7 +20,7 @@ function Usage()
 	echo -e "WOL : WOL Scripting Tool"
 	echo -e "========================"
 	echo -e "This tools looks for a list of hosts in ~/.wolablehosts"
-	echo -e "Each line is an entry of the format 'hostname group MACAddress'"
+	echo -e "Each line is an entry of the format 'hostname MACAddress group [ip|dns]'"
 	echo -e "Where MACAddress if the format 'AA:BB:CC:DD:EE:FF'"
 	echo -e "\n"
 	echo -e "wol list\tList known hosts"
@@ -25,6 +28,7 @@ function Usage()
 	echo -e "wol host [host]\tWake host (Host is optional and the default)"
 	echo -e "wol all\t\tTo wake all hosts in the file"
 	echo -e "wol hostname\tTo wake only the given host"
+	echo -e "wol wait [other options]\tOnce WOLed, wait up to 3m for host to start pinging"
 	echo -e "wol help\tThis message"
 	echo -e "wol -h\t\tThis message"
 	echo -e "\nYou can place multiple group and host options on the commandline"
@@ -81,7 +85,7 @@ function GetTargets()
 function ListHosts()
 {
 	targetcount=${#targets[@]}
-	printf "%-15s %-20s %s\n" "Host" "MAC Address" "Groups"
+	printf "%-15s %-20s %-15s %s\n" "Host" "MAC Address" "Groups" "IP|DNS"
 	echo {1..23} | tr [[:digit:]] "#" | tr [[:space:]] "#"
 	echo -e "\nShowing : ${targetfile}"
 	echo {1..23} | tr [[:digit:]] "#" | tr [[:space:]] "#"
@@ -91,7 +95,7 @@ function ListHosts()
 		read host mac groups rem<<eof
 ${targets[${count}]}
 eof
-		printf "%-15s %-20s %s\n" ${host} ${mac} ${groups}
+		printf "%-15s %-20s %-15s %s\n" ${host} ${mac} ${groups} ${rem}
 	done
 }
 
@@ -125,6 +129,9 @@ eof
 				if [ "${wakegroup}" = ${group} ]; then
 					echo "Waking ${host} from ${group} with ${mac}"
 					${WAKE} "${mac}" > /dev/null
+
+					wakecount=$(( ${wakecount} + 1 ))
+					[ ! "${rem}" = "" ] && waithosts[${#waithosts[@]}]="${rem}"
 				fi
 			done
 
@@ -148,6 +155,8 @@ eof
 			if [ "${wakehost}" = ${host} ]; then
         	               	echo "Waking ${host} with ${mac}"
 				${WAKE} "${mac}" > /dev/null
+				wakecount=$(( ${wakecount} + 1 ))
+				[ ! "${rem}" = "" ] && waithosts[${#waithosts[@]}]="${rem}"
 			fi
 		done
 	done
@@ -159,6 +168,35 @@ function WakeTargets()
 {
 	WakeGroups
 	WakeHosts
+
+	if [ ${PingWait} -gt 0 -a ${#waithosts[@]} -gt 0 ]; then
+		echo -e "Waiting for hosts to be pingable..."
+		pingcount=0
+		hsts=0
+
+		while [ ${pingcount} -lt 180 -a ${#waithosts[@]} -gt 0 ]; do
+			for ((index=0; index < ${#waithosts[@]}; ++index)); do
+				hst=${waithosts[${index}]}
+				echo -e "Pinging ${hst}"
+
+				if [ ! "${hst}" = "" ]; then
+					ping -c 1 ${hst} > /dev/null
+
+					if [ $? -eq 0 ]; then
+						echo -e "${hst} is up"
+						unset waithosts[${index}]
+						hsts=$(( ${hsts} + 1 ))
+					fi
+				fi
+			done
+			[ ${#waithosts[@]} -gt 0 ] && sleep 1;
+			pingcount=$(( ${pingcount} + 1 ))
+		done
+
+		[ ${hsts} -gt 0 ] && echo -e "${hsts} hosts up"
+	fi
+
+	[ ${wakecount} -eq 0 ] && echo -e "No matching groups or hosts found, nothing WOLed"
 }
 
 #
@@ -179,6 +217,7 @@ if [ -e ~/.wolablehosts -o -e ${SYSTEMDB} ]; then
 		"-h"|"help"|"")
 			Usage
 			exit 0 ;;
+		"wait")	PingWait=1 ;;
 		"list")
 			ListHosts
 			exit 0 ;;
