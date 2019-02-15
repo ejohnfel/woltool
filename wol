@@ -71,6 +71,8 @@ function FindTool()
 # Get entries in Database File
 function GetTargets()
 {
+	unset targets
+
 	count=0
 	while read host rem; do
 		if [ ! "${host}" = "#" ]; then
@@ -79,6 +81,12 @@ function GetTargets()
 			count=$(( ${count} + 1 ))
 		fi
 	done < "$1"
+}
+
+# Edit Targets File
+function EditTargets()
+{
+	nano "${1}"
 }
 
 # List hosts in Database File
@@ -224,6 +232,8 @@ if [ -e ~/.wolablehosts -o -e ${SYSTEMDB} ]; then
 		"-c")
 			ConvertFile "$2"
 			exit 0 ;;
+		"-e")	EditTargets "${targetfile}"
+			GetTargets "${targetfile}" ;;
 		"group")
 			groupmode=true
 			;;
