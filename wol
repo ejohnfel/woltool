@@ -1,256 +1,362 @@
-#!/bin/bash
+#!/usr/bin/env python3
 
-declare -a entries
-declare -a targets
-declare -a groups
-declare -a hosts
-declare -a waithosts
+import io
+import os
+import argparse
+import configparser
+import shutil
+import subprocess
+import re
+import time
+import csv
 
-#SYSTEMDB="/usr/local/lib/wolablehosts"
-SYSTEMDB="/opt/scripts/.wolablehosts"
-WAKE="wakeonlan"
-PingWait=0
-wakecount=0
-targetfile=""
+#
+# Variables
+#
 
-# Show Usage
-function Usage()
-{
-	echo -e "========================"
-	echo -e "WOL : WOL Scripting Tool"
-	echo -e "========================"
-	echo -e "This tools looks for a list of hosts in ~/.wolablehosts"
-	echo -e "Each line is an entry of the format 'hostname MACAddress group [ip|dns]'"
-	echo -e "Where MACAddress if the format 'AA:BB:CC:DD:EE:FF'"
-	echo -e "\n"
-	echo -e "wol list\tList known hosts"
-	echo -e "wol group [grp]\tWake all hosts in group"
-	echo -e "wol host [host]\tWake host (Host is optional and the default)"
-	echo -e "wol all\t\tTo wake all hosts in the file"
-	echo -e "wol hostname\tTo wake only the given host"
-	echo -e "wol wait [other options]\tOnce WOLed, wait up to 3m for host to start pinging"
-	echo -e "wol help\tThis message"
-	echo -e "wol -h\t\tThis message"
-	echo -e "\nYou can place multiple group and host options on the commandline"
-}
+# User Config
+config_file = "~/.wolable_hosts.ini"
 
-# Convert: Convert Old Format To New Format
-# Input Parameters: [oldfile]
-function ConvertFile()
-{
-	TMP="/tmp/convert.${RANDOM}"
-	while read host group mac rem; do
-		echo -e "${host} ${mac} ${group}" >> ${TMP}
-	done < "$1"
+# Host/Groups Records
+hosts = dict()
+groups = dict()
 
-	pth=$(dirname "$1")
-	base=$(basename "$1")
-	mv "$1" "${pth}/${base}.bck"
-	mv "${TMP}" "$1"
-}
+# MAC Expression
+mac_expr = re.compile("^(((?P<hex>[a-f0-9]{2})(\:|\-|\s){0,1})){5}(?P=hex)$",re.I)
 
-# Find WOL Tool Binary
-function FindTool()
-{
-	${WAKE} -v > /dev/null
+# Which Tool To Use
+wake_tool = None
 
-	if [ $? = 0 -o $? = 1 ]; then
-		echo -n ""
-	else
-		etherwake -V > /dev/null
+# Delay in Seconds
+delay = 0
 
-		if [ $? = 3 ]; then
-			WAKE=etherwake
-		else
-			echo -e "Neither wakeonlan or etherwake is installed, exitting"
-			exit 127
-		fi
-	fi
-}
+#
+# Functions
+#
 
-# Get entries in Database File
-function GetTargets()
-{
-	unset targets
+def find_tool():
+	"""Find Wol tool on System"""
 
-	count=0
-	while read host rem; do
-		if [ ! "${host}" = "#" ]; then
-			targets[${count}]="${host} ${rem}"
+	tool = shutil.which("wakeonlan")
 
-			count=$(( ${count} + 1 ))
-		fi
-	done < "$1"
-}
+	if tool is None:
+		tool = shutil.which("etherwake")
 
-# Edit Targets File
-function EditTargets()
-{
-	nano "${1}"
-}
+	return tool
 
-# List hosts in Database File
-function ListHosts()
-{
-	targetcount=${#targets[@]}
-	printf "%-15s %-20s %-15s %s\n" "Host" "MAC Address" "Groups" "IP|DNS"
-	echo {1..23} | tr [[:digit:]] "#" | tr [[:space:]] "#"
-	echo -e "\nShowing : ${targetfile}"
-	echo {1..23} | tr [[:digit:]] "#" | tr [[:space:]] "#"
-	echo -e ""
+def make_parser():
+	"""Make Parser"""
 
-	for ((count=0; count < ${targetcount}; ++count)); do
-		read host mac groups rem<<eof
-${targets[${count}]}
-eof
-		printf "%-15s %-20s %-15s %s\n" ${host} ${mac} ${groups} ${rem}
-	done
-}
+	parser = argparse.ArgumentParser(prog="wol", description="Wake host(s)")
 
-# AddTarget : Add Target to appropriate list
-# Input Parameters: [target]
-function AddTarget()
-{
-	if [ "${groupmode}" = "true" ]; then
-		count=${#groups[@]}
-		groups[${count}]="$1"
-	else
-		count=${#hosts[@]}
-		hosts[${count}]="$1"
-	fi
-}
+	parser.add_argument("-c", "--config", help="Load alternate config file")
+	parser.add_argument("-d", "--delay", help="Delay between WOLs when executing more than one")
+	parser.add_argument("-l", "--list", action="store_true", help="List items in config")
+	parser.add_argument("-a", "--add", help="Add host to config file [host,macaddr]")
+	parser.add_argument("--bulkadd", help="Bulk add hosts [host,mac] csv file")
+	parser.add_argument("-r", "--remove", help="Remove host from config")
+	parser.add_argument("--bulkremove", help="Bulk remove from config")
+	parser.add_argument("-g", "--group", help="Add group, [groupname=host1,host2,...]")
+	parser.add_argument("--groupadd", help="Add host to group, [groupname=host]")
+	parser.add_argument("--groupdel", help="Delete host from group, [groupname=host]")
+	parser.add_argument("--delgroup", help="Delete group")
+	parser.add_argument("--convert", help="Convert old style wol host file into config")
+	parser.add_argument("host", nargs="*", help="Host(s) to wake up")
 
-# WakeGroups: Wake listed groups
-# Input Parameters: none
-function WakeGroups()
-{
-	for ((count=0; count < ${#groups[@]}; ++count)); do
-		wakegroup=${groups[${count}]}
+	return parser
 
-		for ((index=0; index < ${#targets[@]}; ++index)); do
-			read host mac groups rem<<eof
-${targets[${index}]}
-eof
-			TFS="${IFS}"
-			IFS=","
-			for group in ${groups}; do
-				if [ "${wakegroup}" = ${group} ]; then
-					echo "Waking ${host} from ${group} with ${mac}"
-					${WAKE} "${mac}" > /dev/null
+def save_config(filename=None):
+	"""Save Config File"""
 
-					wakecount=$(( ${wakecount} + 1 ))
-					[ ! "${rem}" = "" ] && waithosts[${#waithosts[@]}]="${rem}"
-				fi
-			done
+	global hosts, groups
 
-			IFS="${TFS}"
-		done
-	done
-}
+	config = configparser.ConfigParser()
 
-# WakeHosts: Wake listed hosts
-# Input Parameters: none
-function WakeHosts()
-{
-	for ((count=0; count < ${#hosts[@]}; ++count)); do
-		wakehost=${hosts[${count}]}
+	config["hosts"] = hosts
+	config["groups"] = {}
+	config["settings"] = {}
 
-		for ((index=0; index < ${#targets[@]}; ++index)); do
-			read host mac groups rem<<eof
-${targets[${index}]}
-eof
+	for groupname,hosts in groups.items():
+		config["groups"][groupname] = ",".join(hosts)
 
-			if [ "${wakehost}" = ${host} ]; then
-        	               	echo "Waking ${host} with ${mac}"
-				${WAKE} "${mac}" > /dev/null
-				wakecount=$(( ${wakecount} + 1 ))
-				[ ! "${rem}" = "" ] && waithosts[${#waithosts[@]}]="${rem}"
-			fi
-		done
-	done
-}
+	if filename is None:
+		filename = config_file
 
-# WakeTargets: Wake Targets in Host and Group Lists
-# Input Parameters: none
-function WakeTargets()
-{
-	WakeGroups
-	WakeHosts
+	fname = os.path.expanduser(filename)
 
-	if [ ${PingWait} -gt 0 -a ${#waithosts[@]} -gt 0 ]; then
-		echo -e "Waiting for hosts to be pingable..."
-		pingcount=0
-		hsts=0
+	with open(fname,"w") as configfile:
+		config.write(configfile)
 
-		while [ ${pingcount} -lt 180 -a ${#waithosts[@]} -gt 0 ]; do
-			for ((index=0; index < ${#waithosts[@]}; ++index)); do
-				hst=${waithosts[${index}]}
-				echo -e "Pinging ${hst}"
+def load_config(filename=None):
+	"""Load A Config File"""
 
-				if [ ! "${hst}" = "" ]; then
-					ping -c 1 ${hst} > /dev/null
+	global hosts, groups
 
-					if [ $? -eq 0 ]; then
-						echo -e "${hst} is up"
-						unset waithosts[${index}]
-						hsts=$(( ${hsts} + 1 ))
-					fi
-				fi
-			done
-			[ ${#waithosts[@]} -gt 0 ] && sleep 1;
-			pingcount=$(( ${pingcount} + 1 ))
-		done
+	config = configparser.ConfigParser()
 
-		[ ${hsts} -gt 0 ] && echo -e "${hsts} hosts up"
-	fi
+	if filename is None:
+		filename = config_file
 
-	[ ${wakecount} -eq 0 ] && echo -e "No matching groups or hosts found, nothing WOLed"
-}
+	fname = os.path.expanduser(filename)
+
+	if os.path.exists(fname):
+		config.read(fname)
+
+		# Transition Config to internal data structures
+
+		settings = config["settings"]
+
+		for groupname in config["groups"]:
+			grouphosts = config["groups"][groupname]
+
+			groups[groupname] = grouphosts.split(",")
+
+		for hostname in config["hosts"]:
+			macaddr = config["hosts"][hostname]
+
+			hosts[hostname] = macaddr
+	else:
+		print(f"No config exists, creating it in {filename}")
+		save_config(filename)
+
+def list_hosts():
+	"""List hosts In Config"""
+
+	global hosts, groups
+
+	print("\nHosts\n=====")
+
+	hostnames = list(hosts.keys())
+	hostnames.sort()
+
+	for host in hostnames:
+		mac = hosts[host]
+		print(f"{host:<25}{mac}")
+
+	if len(hosts) == 0:
+		print("I have no hosts at the moment")
+
+	print("\nGroups\n======")
+
+	groupnames = list(groups.keys())
+	groupnames.sort()
+
+	for groupname in groupnames:
+		grouphosts = groups[groupname]
+		print(f"{groupname:<25}{grouphosts}")
+
+	if len(groups) == 0:
+		print("I have no groups at the moment")
+
+def add_host(host, macaddr=None, auto_save=True):
+	"""Add Host To Config File"""
+
+	if macaddr is None:
+		host, macaddr = host.split(",")
+
+	if host not in hosts:
+		hosts[host] = macaddr
+
+	if auto_save:
+		save_config()
+
+def bulk_add(filename):
+	"""Bulk Add Hosts To Config"""
+
+	if os.path.exists(filename):
+		with open(filename,"r",newline='') as fin:
+			reader = csv.reader(fin)
+
+			for row in reader:
+				host = row[0]
+				mac = row[1]
+
+				add_host(host, mac, False)
+
+		save_config()
+	else:
+		print(f"{filename} does not exist")
+
+def remove_host(host, auto_save=True):
+	"""Remove Host From Config"""
+
+	if host in hosts:
+		del hosts[host]
+
+	for groupname in groups.keys():
+		if host in groups[groupname]:
+			groups[groupname].remove(host)
+
+	if auto_save:
+		save_config()
+
+def bulk_remove(filename):
+	"""Bulk Remove Hosts From Config"""
+
+	if os.path.exists(filename):
+		with open(filename,"r",newline='') as fin:
+			for host in fin:
+				remove_host(host,False)
+
+		save_config()
+	else:
+		print(f"{filename} does not exist")
+
+def add_group(groupname, hosts):
+	"""Add Group"""
+
+	if groupname not in groups:
+		groups[groupname] = hosts
+
+		save_config()
+
+def remove_group(groupname):
+	"""Remove Group"""
+
+	if groupname in groups:
+		del groups[groupname]
+
+		save_config()
+
+def add_to_group(groupname, host):
+	"""Add Host To Group"""
+
+	if groupname in groups:
+		grouphosts = groups[groupname]
+
+		if host not in groups[groupname]:
+			groups[groupname].append(host)
+
+			save_config()
+	else:
+		add_group(groupname,[ host ])
+
+def remove_from_group(groupname, host):
+	"""Remove host from Group"""
+
+	if groupname in groups:
+		if host in groups[groupname]:
+			groups[groupname].remove(host)
+
+			save_config()
+
+def convert_old(filename):
+	"""Convert Old Style Config to New Config"""
+
+	if os.path.exists(filename):
+		with open(filename,"r",newline='') as fin:
+			reader = csv.reader(fin,delimiter=" ")
+
+			for row in reader:
+				host = row[0]
+				macaddr = row[1]
+				platform = row[2]
+				hostname = row[3]
+
+				add_host(host,macaddr,False)
+
+			save_config()
+	else:
+		print(f"{filename} does not exist")
+
+def set_delay(delay_str):
+	"""Set Delay from String"""
+
+	global delay
+
+	sym_expr = re.compile("^[0-9]+(s|m|h)$")
+
+	if sym_expr.search(delay_str):
+		factor = 1
+		factor_str = delay_str[-1]
+		delay_value = int(delay_str[0:-1])
+
+		if factor_str == "m":
+			factor = 60
+		elif factor_str == "h":
+			factor = (60 * 60)
+
+		delay = (delay_value * factor)
+	else:
+		delay = int(delay_str)
+
+def wol_host(host):
+	"""Wake Host"""
+
+	global wake_tool, delay
+
+	macaddr = None
+
+	if host in hosts:
+		macaddr = hosts[host]
+	if host in groups:
+		grouphosts = groups[host]
+
+		for host in grouphosts:
+			wol_host(host)
+	elif mac_expr.search(host):
+		macaddr = re.sub("[\s\-]", ":", host, count=5)
+
+	if macaddr is not None:
+		result = subprocess.run([wake_tool, macaddr])
+
+		if result.returncode != 0:
+			print(f"Something went wrong : {result.returncode}")
+
+		if delay > 0:
+			print(f"Sleeping {delay} seconds")
+			time.sleep(delay)
+	else:
+		print(f"{host} not in config or not a recognized MAC Address")
 
 #
 # Main Loop
 #
 
-if [ -e ~/.wolablehosts -o -e ${SYSTEMDB} ]; then
-	if [ -e ~/.wolablehosts ]; then
-		targetfile=~/.wolablehosts
-	else
-		targetfile=${SYSTEMDB}
-	fi
+if __name__ == "__main__":
+	parser = make_parser()
 
-	GetTargets "${targetfile}"
+	args = parser.parse_args()
 
-	while [ ! "$1" = "" ]; do
-		case "$1" in
-		"-h"|"help"|"")
-			Usage
-			exit 0 ;;
-		"wait")	PingWait=1 ;;
-		"list")
-			ListHosts
-			exit 0 ;;
-		"-c")
-			ConvertFile "$2"
-			exit 0 ;;
-		"-e")	EditTargets "${targetfile}"
-			GetTargets "${targetfile}" ;;
-		"group")
-			groupmode=true
-			;;
-		"host")
-			groupmode=false
-			;;
-		*)
-			AddTarget "$1"
-			;;
-		esac
-		shift 1
-	done
+	if args.config is not None:
+		config_file = args.config
 
-	FindTool
+	if args.delay is not None:
+		set_delay(args.delay)
 
-	WakeTargets
-else
-        echo "No list of wol-able hosts found"
-fi
+	load_config(config_file)
 
+	if args.convert is not None:
+		convert_old(args.convert)
+	elif args.list:
+		list_hosts()
+	elif args.add is not None:
+		add_host(args.add)
+	elif args.bulkadd is not None:
+		bulk_add(args.bulkadd)
+	elif args.remove is not None:
+		remove_host(args.remove)
+	elif args.bulkremove is not None:
+		bulk_remove(args.bulkremove)
+	elif args.group is not None:
+		groupname,grouphosts = args.group.split("=")
+		grouphosts = grouphosts.split(",")
+
+		add_group(groupname,grouphosts)
+	elif args.groupadd is not None:
+		groupname,host = args.groupadd.split("=")
+		add_to_group(groupname,host)
+	elif args.groupdel is not None:
+		groupname,host = args.groupdel.split("=")
+		remove_from_group(groupname,host)
+	elif args.delgroup is not None:
+		remove_group(args.groupname)
+	else:
+		wake_tool = find_tool()
+
+		if wake_tool is not None:
+			for host in args.host:
+				wol_host(host)
+		else:
+			print("It appears neither X or Y are installed, so I can't wake anything")
+			print("Consider installing wakeonlan or etherwake")
