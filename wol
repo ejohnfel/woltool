@@ -10,6 +10,10 @@ import re
 import time
 import csv
 
+# Version
+VERSION=(0,0,1)
+Version = __version__ = ".".join([ str(x) for x in VERSION ])
+
 #
 # Variables
 #
@@ -22,7 +26,7 @@ hosts = dict()
 groups = dict()
 
 # MAC Expression
-mac_expr = re.compile("^(((?P<hex>[a-f0-9]{2})(\:|\-|\s){0,1})){5}(?P=hex)$",re.I)
+mac_expr = re.compile(r"^((?P<hex>[a-f0-9]{2})(\:|\-|\s){0,1}){6}$",re.I)
 
 # Which Tool To Use
 wake_tool = None
@@ -50,8 +54,10 @@ def make_parser():
 	parser = argparse.ArgumentParser(prog="wol", description="Wake host(s)")
 
 	parser.add_argument("-c", "--config", help="Load alternate config file")
+	parser.add_argument("-v", "--version", action="store_true", help="Show version")
 	parser.add_argument("-d", "--delay", help="Delay between WOLs when executing more than one")
 	parser.add_argument("-l", "--list", action="store_true", help="List items in config")
+	parser.add_argument("-f", "--file", help="WOL MAC Addresses in file, one MAC Address per line")
 	parser.add_argument("-a", "--add", help="Add host to config file [host,macaddr]")
 	parser.add_argument("--bulkadd", help="Bulk add hosts [host,mac] csv file")
 	parser.add_argument("-r", "--remove", help="Remove host from config")
@@ -61,6 +67,7 @@ def make_parser():
 	parser.add_argument("--groupdel", help="Delete host from group, [groupname=host]")
 	parser.add_argument("--delgroup", help="Delete group")
 	parser.add_argument("--convert", help="Convert old style wol host file into config")
+	parser.add_argument("--test", action="store_true", help="Enter test mode")
 	parser.add_argument("host", nargs="*", help="Host(s) to wake up")
 
 	return parser
@@ -280,40 +287,62 @@ def set_delay(delay_str):
 	else:
 		delay = int(delay_str)
 
-def wol_host(host):
+def wol_host(items):
 	"""Wake Host"""
 
 	global wake_tool, delay
 
-	macaddr = None
+	host_list = list()
 
-	if host in hosts:
-		macaddr = hosts[host]
-	if host in groups:
-		grouphosts = groups[host]
-
-		for host in grouphosts:
-			wol_host(host)
-	elif mac_expr.search(host):
-		macaddr = re.sub("[\s\-]", ":", host, count=5)
-
-	if macaddr is not None:
-		result = subprocess.run([wake_tool, macaddr])
-
-		if result.returncode != 0:
-			print(f"Something went wrong : {result.returncode}")
-
-		if delay > 0:
-			print(f"Sleeping {delay} seconds")
-			time.sleep(delay)
+	if type(items) is list:
+		host_list.extend(items)
 	else:
-		print(f"{host} not in config or not a recognized MAC Address")
+		host_list.append(items)
+
+	for host in host_list:
+		if host in hosts:
+			macaddr = hosts[host]
+
+			if mac_expr.search(macaddr) is not None:
+				print(f"WoL-ing {host}/{macaddr}... ",end="",flush=True)
+				result = subprocess.run([wake_tool, macaddr])
+
+				if wake_tool == "wakeonlan":
+					print("")
+
+				if result.returncode != 0:
+					print(f"Something went wrong : {result.returncode}")
+
+				if delay > 0:
+					print(f"Sleeping {delay} seconds")
+					time.sleep(delay)
+			else:
+				print(f"{macaddr} is not a valid mac address")
+		elif host in groups:
+			grouphosts = groups[host]
+
+			print(f"Waking group : {host}")
+			for host in grouphosts:
+				wol_host(host)
+		elif mac_expr.search(host):
+			macaddr = re.sub("[\s\-]", ":", host, count=5)
+		else:
+			print(f'"{host}" not in config or not a valid MAC Address')
+
+def test(args):
+	"""Test Function"""
+
+	breakpoint()
+
+	pass
 
 #
 # Main Loop
 #
 
 if __name__ == "__main__":
+	imported_macs = list()
+
 	parser = make_parser()
 
 	args = parser.parse_args()
@@ -324,9 +353,27 @@ if __name__ == "__main__":
 	if args.delay is not None:
 		set_delay(args.delay)
 
+	if args.file is not None:
+		if os.path.exists(args.file):
+			with open(file,"rt") as fin:
+				count = 1
+
+				for line in fin:
+					macaddr = line.trim()
+
+					imported_macs.append(macaddr)
+
+					count += 1
+		else:
+			print(f"{file} does not exist")
+
 	load_config(config_file)
 
-	if args.convert is not None:
+	if args.test:
+		test(args)
+	elif args.version:
+		print(f"Wol tool : {Version}")
+	elif args.convert is not None:
 		convert_old(args.convert)
 	elif args.list:
 		list_hosts()
@@ -355,6 +402,9 @@ if __name__ == "__main__":
 		wake_tool = find_tool()
 
 		if wake_tool is not None:
+			if len(imported_macs) > 0:
+				wol_host(imported_macs)
+
 			for host in args.host:
 				wol_host(host)
 		else:
